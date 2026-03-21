@@ -1,0 +1,176 @@
+# Image Server - All-in-one UBI10 container
+# PostgreSQL 17 + pgvector + FastAPI + fastembed
+#
+# Build:
+#   podman build -t quay.io/crunchtools/image-server .
+#
+# Run:
+#   podman run -d --name image-server \
+#     -p 8000:8000 \
+#     -v image-server-pgdata:/var/lib/pgsql/data:Z \
+#     -v image-server-media:/data/media:Z \
+#     --env-file image-server.env \
+#     --systemd=always \
+#     quay.io/crunchtools/image-server
+
+# Stage 1: Build pgvector from source
+FROM registry.access.redhat.com/ubi10/ubi-init:latest AS pgvector-build
+RUN dnf install -y \
+    gcc gcc-c++ make wget \
+    redhat-rpm-config \
+    postgresql-server-devel && \
+    cd /tmp && \
+    wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.7.4.tar.gz && \
+    tar xf v0.7.4.tar.gz && \
+    cd pgvector-0.7.4 && \
+    make && \
+    make install DESTDIR=/pgvector-install
+
+# Stage 2: Build Python wheels
+FROM registry.access.redhat.com/ubi10/ubi-init:latest AS python-build
+RUN dnf install -y \
+    python3.12 python3.12-pip python3.12-devel \
+    gcc gcc-c++ make \
+    postgresql-devel && \
+    dnf clean all
+
+WORKDIR /build
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+
+RUN python3.12 -m pip wheel --no-cache-dir --wheel-dir=/wheels "."
+
+# Pre-download the embedding model
+RUN python3.12 -m pip install --no-cache-dir fastembed>=0.4 && \
+    python3.12 -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')" && \
+    echo "Embedding model cached"
+
+# Stage 3: Final image
+FROM registry.access.redhat.com/ubi10/ubi-init:latest
+
+# Install packages from RHEL repos
+RUN dnf install -y \
+    postgresql-server \
+    postgresql-contrib \
+    python3.12 \
+    python3.12-pip \
+    sudo \
+    curl \
+    ca-certificates \
+    procps-ng && \
+    dnf clean all
+
+# Copy pgvector from build stage
+COPY --from=pgvector-build /pgvector-install/usr/ /usr/
+
+# Install Python application
+COPY --from=python-build /wheels /wheels
+RUN python3.12 -m pip install --no-cache-dir --no-index --find-links=/wheels image-server && \
+    rm -rf /wheels
+
+# Copy pre-downloaded embedding model from build stage
+COPY --from=python-build /root/.cache/fastembed /root/.cache/fastembed
+
+# Verify installation
+RUN python3.12 -c "from image_server import __version__; print(f'Image server v{__version__}')"
+
+# Configure PostgreSQL
+RUN mkdir -p /var/lib/pgsql/data && \
+    chown -R postgres:postgres /var/lib/pgsql && \
+    sudo -u postgres /usr/bin/initdb -D /var/lib/pgsql/data
+
+# Create image-server user and media directories
+RUN useradd -r -s /bin/false image-server && \
+    mkdir -p /data/media/originals /data/media/thumbnails /data/media/videos /data/media/theme-videos && \
+    chown -R image-server:image-server /data/media
+
+# Database initialization script
+RUN cat > /usr/local/bin/init-imageserver-db.sh << 'DBEOF'
+#!/bin/bash
+set -e
+
+until pg_isready -U postgres > /dev/null 2>&1; do
+  sleep 1
+done
+
+sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = 'imageserver'" | grep -q 1 || \
+  sudo -u postgres createdb imageserver
+
+sudo -u postgres psql -tc "SELECT 1 FROM pg_user WHERE usename = 'imageserver'" | grep -q 1 || \
+  sudo -u postgres psql -c "CREATE USER imageserver WITH PASSWORD 'imageserver';"
+
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE imageserver TO imageserver;"
+sudo -u postgres psql -d imageserver -c "GRANT ALL ON SCHEMA public TO imageserver;"
+sudo -u postgres psql -d imageserver -c "ALTER DATABASE imageserver OWNER TO imageserver;"
+sudo -u postgres psql -d imageserver -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+echo "Image server database initialized with pgvector"
+DBEOF
+RUN chmod +x /usr/local/bin/init-imageserver-db.sh
+
+# Create environment file
+RUN cat > /etc/image-server.env << 'ENVEOF'
+PGHOST=localhost
+PGPORT=5432
+PGDATABASE=imageserver
+PGUSER=imageserver
+PGPASSWORD=imageserver
+MEDIA_PATH=/data/media
+THUMBNAIL_SIZE=250
+VISION_BACKEND=none
+EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+HOST=0.0.0.0
+PORT=8000
+ENVEOF
+
+# Database init service (oneshot, runs after postgresql)
+RUN cat > /etc/systemd/system/imageserver-db-init.service << 'EOF'
+[Unit]
+Description=Initialize Image Server Database
+After=postgresql.service
+Requires=postgresql.service
+Before=image-server.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/init-imageserver-db.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# FastAPI server service
+RUN cat > /etc/systemd/system/image-server.service << 'EOF'
+[Unit]
+Description=Image Server (FastAPI)
+After=network.target postgresql.service imageserver-db-init.service
+Requires=postgresql.service imageserver-db-init.service
+
+[Service]
+Type=simple
+User=image-server
+EnvironmentFile=/etc/image-server.env
+ExecStart=/usr/bin/python3.12 -m image_server
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable services
+RUN systemctl enable postgresql && \
+    systemctl enable imageserver-db-init && \
+    systemctl enable image-server
+
+EXPOSE 8000
+
+LABEL name="image-server" \
+      version="0.1.0" \
+      summary="Lightweight image server with AI captioning and semantic search" \
+      description="PostgreSQL + pgvector + FastAPI image server for ROTV" \
+      maintainer="crunchtools.com" \
+      io.containers.autoupdate="registry"
+
+CMD ["/sbin/init"]
