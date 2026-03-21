@@ -1,8 +1,10 @@
-# Image Server - All-in-one UBI10 container
-# PostgreSQL 17 + pgvector + FastAPI + fastembed
+# Image Server - All-in-one container on ubi10-core
+# Services: PostgreSQL + pgvector, FastAPI + fastembed
 #
-# Build:
-#   podman build -t quay.io/crunchtools/image-server .
+# Build (local, with RHSM):
+#   podman build --secret id=RHSM_ACTIVATION_KEY,src=<key-file> \
+#                --secret id=RHSM_ORG_ID,src=<org-file> \
+#                -t quay.io/crunchtools/image-server .
 #
 # Run:
 #   podman run -d --name image-server \
@@ -13,26 +15,39 @@
 #     --systemd=always \
 #     quay.io/crunchtools/image-server
 
-# Stage 1: Build pgvector from source
+# Stage 1: Build pgvector from source — postgresql-server-devel requires RHSM
 FROM registry.access.redhat.com/ubi10/ubi-init:latest AS pgvector-build
-RUN dnf install -y \
+RUN --mount=type=secret,id=RHSM_ACTIVATION_KEY \
+    --mount=type=secret,id=RHSM_ORG_ID \
+    subscription-manager register \
+      --activationkey="$(cat /run/secrets/RHSM_ACTIVATION_KEY)" \
+      --org="$(cat /run/secrets/RHSM_ORG_ID)" \
+    && dnf install -y \
     gcc gcc-c++ make wget \
     redhat-rpm-config \
-    postgresql-server-devel && \
-    cd /tmp && \
-    wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.7.4.tar.gz && \
-    tar xf v0.7.4.tar.gz && \
-    cd pgvector-0.7.4 && \
-    make && \
-    make install DESTDIR=/pgvector-install
+    postgresql-server-devel \
+    && dnf clean all \
+    && subscription-manager unregister \
+    && cd /tmp \
+    && wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.7.4.tar.gz \
+    && tar xf v0.7.4.tar.gz \
+    && cd pgvector-0.7.4 \
+    && make OPTFLAGS="-march=x86-64-v3" \
+    && make install DESTDIR=/pgvector-install
 
-# Stage 2: Build Python wheels
+# Stage 2: Build Python wheels — python3.12-devel requires RHSM
 FROM registry.access.redhat.com/ubi10/ubi-init:latest AS python-build
-RUN dnf install -y \
+RUN --mount=type=secret,id=RHSM_ACTIVATION_KEY \
+    --mount=type=secret,id=RHSM_ORG_ID \
+    subscription-manager register \
+      --activationkey="$(cat /run/secrets/RHSM_ACTIVATION_KEY)" \
+      --org="$(cat /run/secrets/RHSM_ORG_ID)" \
+    && dnf install -y \
     python3.12 python3.12-pip python3.12-devel \
     gcc gcc-c++ make \
-    postgresql-devel && \
-    dnf clean all
+    postgresql-devel \
+    && dnf clean all \
+    && subscription-manager unregister
 
 WORKDIR /build
 COPY pyproject.toml README.md ./
@@ -45,20 +60,28 @@ RUN python3.12 -m pip install --no-cache-dir fastembed>=0.4 && \
     python3.12 -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')" && \
     echo "Embedding model cached"
 
-# Stage 3: Final image
-FROM registry.access.redhat.com/ubi10/ubi-init:latest
+# Stage 3: Final image — inherits troubleshooting tools, systemd hardening from ubi10-core
+FROM quay.io/crunchtools/ubi10-core:latest
 
-# Install packages from RHEL repos
-RUN dnf install -y \
-    postgresql-server \
-    postgresql-contrib \
-    python3.12 \
-    python3.12-pip \
-    sudo \
-    curl \
-    ca-certificates \
-    procps-ng && \
-    dnf clean all
+LABEL maintainer="fatherlinux <scott.mccarty@crunchtools.com>"
+LABEL description="Image Server - PostgreSQL + pgvector + FastAPI for ROTV"
+LABEL version="0.1.0"
+
+# postgresql-server requires RHSM
+RUN --mount=type=secret,id=RHSM_ACTIVATION_KEY \
+    --mount=type=secret,id=RHSM_ORG_ID \
+    subscription-manager register \
+      --activationkey="$(cat /run/secrets/RHSM_ACTIVATION_KEY)" \
+      --org="$(cat /run/secrets/RHSM_ORG_ID)" \
+    && dnf install -y \
+      postgresql-server \
+      postgresql-contrib \
+      python3.12 \
+      python3.12-pip \
+      sudo \
+      ca-certificates \
+    && dnf clean all \
+    && subscription-manager unregister
 
 # Copy pgvector from build stage
 COPY --from=pgvector-build /pgvector-install/usr/ /usr/
@@ -74,10 +97,10 @@ COPY --from=python-build /root/.cache/huggingface /root/.cache/huggingface
 # Verify installation
 RUN python3.12 -c "from image_server import __version__; print(f'Image server v{__version__}')"
 
-# Configure PostgreSQL
+# Initialize PostgreSQL
 RUN mkdir -p /var/lib/pgsql/data && \
     chown -R postgres:postgres /var/lib/pgsql && \
-    sudo -u postgres /usr/bin/initdb -D /var/lib/pgsql/data
+    runuser -u postgres -- /usr/bin/initdb -D /var/lib/pgsql/data
 
 # Create image-server user and media directories
 RUN useradd -r -s /bin/false image-server && \
@@ -166,11 +189,6 @@ RUN systemctl enable postgresql && \
 
 EXPOSE 8000
 
-LABEL name="image-server" \
-      version="0.1.0" \
-      summary="Lightweight image server with AI captioning and semantic search" \
-      description="PostgreSQL + pgvector + FastAPI image server for ROTV" \
-      maintainer="crunchtools.com" \
-      io.containers.autoupdate="registry"
+VOLUME ["/var/lib/pgsql/data", "/data/media"]
 
-CMD ["/sbin/init"]
+STOPSIGNAL SIGRTMIN+3
