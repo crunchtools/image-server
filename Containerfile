@@ -201,6 +201,7 @@ Requires=postgresql.service imageserver-db-init.service
 Type=simple
 User=image-server
 EnvironmentFile=/etc/image-server.env
+ExecStartPre=+/bin/bash -c 'mkdir -p /data/media/originals /data/media/thumbnails /data/media/videos /data/media/theme-videos && chown -R image-server:image-server /data/media'
 ExecStart=/usr/bin/python3.12 -m image_server
 Restart=always
 RestartSec=10
