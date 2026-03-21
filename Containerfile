@@ -40,7 +40,7 @@ COPY src/ ./src/
 
 RUN python3.12 -m pip wheel --no-cache-dir --wheel-dir=/wheels "."
 
-# Pre-download the embedding model
+# Pre-download the embedding model (cached in huggingface hub)
 RUN python3.12 -m pip install --no-cache-dir fastembed>=0.4 && \
     python3.12 -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')" && \
     echo "Embedding model cached"
@@ -69,7 +69,7 @@ RUN python3.12 -m pip install --no-cache-dir --no-index --find-links=/wheels ima
     rm -rf /wheels
 
 # Copy pre-downloaded embedding model from build stage
-COPY --from=python-build /root/.cache/fastembed /root/.cache/fastembed
+COPY --from=python-build /root/.cache/huggingface /root/.cache/huggingface
 
 # Verify installation
 RUN python3.12 -c "from image_server import __version__; print(f'Image server v{__version__}')"
