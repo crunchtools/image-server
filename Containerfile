@@ -55,10 +55,10 @@ COPY src/ ./src/
 
 RUN python3.12 -m pip wheel --no-cache-dir --wheel-dir=/wheels "."
 
-# Pre-download the embedding model (cached in huggingface hub)
+# Pre-download the embedding model to a known shared location
 RUN python3.12 -m pip install --no-cache-dir fastembed>=0.4 && \
-    python3.12 -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')" && \
-    echo "Embedding model cached"
+    python3.12 -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5', cache_dir='/opt/fastembed-cache')" && \
+    echo "Embedding model cached to /opt/fastembed-cache"
 
 # Stage 3: Final image — inherits troubleshooting tools, systemd hardening from ubi10-core
 FROM quay.io/crunchtools/ubi10-core:latest
@@ -91,8 +91,9 @@ COPY --from=python-build /wheels /wheels
 RUN python3.12 -m pip install --no-cache-dir --no-index --find-links=/wheels image-server && \
     rm -rf /wheels
 
-# Copy pre-downloaded embedding model from build stage
-COPY --from=python-build /root/.cache/huggingface /root/.cache/huggingface
+# Copy pre-downloaded embedding model from build stage (shared location, readable by all)
+COPY --from=python-build /opt/fastembed-cache /opt/fastembed-cache
+RUN chmod -R a+rX /opt/fastembed-cache
 
 # Verify installation
 RUN python3.12 -c "from image_server import __version__; print(f'Image server v{__version__}')"
@@ -169,6 +170,7 @@ MEDIA_PATH=/data/media
 THUMBNAIL_SIZE=250
 VISION_BACKEND=none
 EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+EMBEDDING_CACHE_DIR=/opt/fastembed-cache
 HOST=0.0.0.0
 PORT=8000
 ENVEOF

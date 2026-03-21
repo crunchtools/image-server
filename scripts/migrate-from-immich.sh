@@ -9,7 +9,7 @@
 #   - image-server health endpoint responds
 #   - Immich API key available
 
-set -euo pipefail
+set -uo pipefail
 
 IMMICH_URL="http://127.0.0.1:8088"
 IMMICH_API_KEY="MosNnoHDjChjHA5y6v86HOFNmwZKFRB0zZakM4oy4"
@@ -69,7 +69,7 @@ while IFS='|' read -r POI_ID ASSET_ID MIME_TYPE; do
 
     # Download original from Immich
     TMPFILE="$TMPDIR/${ASSET_ID}"
-    HTTP_CODE=$(curl -sf -w '%{http_code}' -o "$TMPFILE" \
+    HTTP_CODE=$(curl -s -w '%{http_code}' -o "$TMPFILE" \
         -H "x-api-key: $IMMICH_API_KEY" \
         "$IMMICH_URL/api/assets/$ASSET_ID/original" 2>/dev/null || echo "000")
 
@@ -93,7 +93,7 @@ while IFS='|' read -r POI_ID ASSET_ID MIME_TYPE; do
     esac
 
     # Upload to image server
-    UPLOAD_RESPONSE=$(curl -sf -X POST \
+    UPLOAD_RESPONSE=$(curl -s -X POST \
         -F "file=@${TMPFILE};type=${MIME_TYPE};filename=poi-${POI_ID}.${EXT}" \
         -F "poi_id=$POI_ID" \
         -F "role=primary" \

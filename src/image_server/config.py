@@ -43,6 +43,7 @@ class Config:
         self.embedding_model: str = os.environ.get(
             "EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
         )
+        self.embedding_cache_dir: str | None = os.environ.get("EMBEDDING_CACHE_DIR")
 
         # Storage
         self.media_path: str = os.environ.get("MEDIA_PATH", "/data/media")

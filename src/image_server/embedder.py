@@ -18,8 +18,11 @@ def get_model() -> TextEmbedding:
     if _model is None:
         from fastembed import TextEmbedding
 
-        model_name = get_config().embedding_model
-        _model = TextEmbedding(model_name=model_name)
+        cfg = get_config()
+        kwargs: dict[str, str] = {"model_name": cfg.embedding_model}
+        if cfg.embedding_cache_dir:
+            kwargs["cache_dir"] = cfg.embedding_cache_dir
+        _model = TextEmbedding(**kwargs)
     return _model
 
 
