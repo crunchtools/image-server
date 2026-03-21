@@ -20,6 +20,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
     "pgvector>=0.3",
     "fastembed>=0.4",
     "Pillow>=11.0",

@@ -8,12 +8,13 @@ from typing import Any
 import psycopg
 from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-_pool: psycopg.ConnectionPool | None = None
+_pool: ConnectionPool | None = None
 
 SCHEMA_SQL = """
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -55,12 +56,12 @@ WITH (lists = 10);
 """
 
 
-def get_pool() -> psycopg.ConnectionPool:
+def get_pool() -> ConnectionPool:
     """Get or create the connection pool."""
     global _pool
     if _pool is None:
         cfg = get_config()
-        _pool = psycopg.ConnectionPool(
+        _pool = ConnectionPool(
             cfg.dsn,
             min_size=2,
             max_size=10,
