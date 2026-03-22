@@ -58,6 +58,12 @@ def _serialize_asset(asset: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+@app.get("/")
+async def root() -> dict[str, str]:
+    """Root endpoint."""
+    return {"service": "image-server", "health": "/api/health"}
+
+
 @app.get("/api/health")
 async def health() -> dict[str, str]:
     """Health check endpoint."""
