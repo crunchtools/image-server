@@ -11,7 +11,7 @@ on:
 
 env:
   REGISTRY: quay.io
-  IMAGE_NAME: crunchtools/image-server
+  IMAGE_NAME: crunchtools/images-rotv
 
 jobs:
   build:
