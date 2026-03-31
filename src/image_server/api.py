@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from . import database as db
 from .config import get_config
@@ -431,3 +433,138 @@ async def bulk_caption(body: dict[str, Any]) -> dict[str, Any]:
             results["errors"].append({"id": asset_id, "error": str(exc)})
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Backup / Restore / Media endpoints
+# ---------------------------------------------------------------------------
+
+MEDIA_SUBDIRS = {"originals", "thumbnails", "videos", "theme-videos"}
+
+
+@app.get("/api/backup/db")
+async def backup_db() -> StreamingResponse:
+    """Stream a pg_dump of the image server database."""
+    cfg = get_config()
+    env = {
+        "PGHOST": cfg.pg_host,
+        "PGPORT": str(cfg.pg_port),
+        "PGDATABASE": cfg.pg_database,
+        "PGUSER": cfg.pg_user,
+        "PGPASSWORD": cfg.pg_password,
+    }
+    try:
+        result = subprocess.run(
+            ["pg_dump", "--clean", "--if-exists"],  # noqa: S607
+            env=env,
+            capture_output=True,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail="pg_dump not found on server") from exc
+    except subprocess.CalledProcessError as exc:
+        logger.exception("pg_dump failed: %s", exc.stderr.decode(errors="replace"))
+        raise HTTPException(status_code=500, detail="pg_dump failed") from exc
+
+    return StreamingResponse(
+        iter([result.stdout]),
+        media_type="application/sql",
+        headers={"Content-Disposition": "attachment; filename=imageserver-backup.sql"},
+    )
+
+
+@app.post("/api/restore/db")
+async def restore_db(file: UploadFile = File(...)) -> dict[str, Any]:  # noqa: B008
+    """Restore the image server database from a SQL dump upload."""
+    cfg = get_config()
+    env = {
+        "PGHOST": cfg.pg_host,
+        "PGPORT": str(cfg.pg_port),
+        "PGDATABASE": cfg.pg_database,
+        "PGUSER": cfg.pg_user,
+        "PGPASSWORD": cfg.pg_password,
+    }
+    sql_data = await file.read()
+    try:
+        result = subprocess.run(
+            ["psql"],  # noqa: S607
+            env=env,
+            input=sql_data,
+            capture_output=True,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail="psql not found on server") from exc
+    except subprocess.CalledProcessError as exc:
+        logger.exception("psql restore failed: %s", exc.stderr.decode(errors="replace"))
+        raise HTTPException(
+            status_code=500,
+            detail=f"psql restore failed: {exc.stderr.decode(errors='replace')[:500]}",
+        ) from exc
+
+    return {"restored": True, "output": result.stdout.decode(errors="replace")[:1000]}
+
+
+@app.get("/api/media/files")
+async def list_media_files() -> list[dict[str, Any]]:
+    """List all files in media subdirectories."""
+    cfg = get_config()
+    base = Path(cfg.media_path)
+    files: list[dict[str, Any]] = []
+    for subdir in sorted(MEDIA_SUBDIRS):
+        dir_path = base / subdir
+        if not dir_path.is_dir():
+            continue
+        for file_path in sorted(dir_path.iterdir()):
+            if not file_path.is_file():
+                continue
+            stat = file_path.stat()
+            files.append({
+                "subdir": subdir,
+                "filename": file_path.name,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+            })
+    return files
+
+
+@app.get("/api/media/{subdir}/{filename}")
+async def serve_media_file(subdir: str, filename: str) -> FileResponse:
+    """Serve any file from a media subdirectory."""
+    if subdir not in MEDIA_SUBDIRS:
+        raise HTTPException(status_code=400, detail=f"Invalid subdir: {subdir}")
+
+    # Block path traversal
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    cfg = get_config()
+    file_path = Path(cfg.media_path) / subdir / filename
+
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    mime, _ = mimetypes.guess_type(filename)
+    return FileResponse(path=str(file_path), media_type=mime or "application/octet-stream")
+
+
+@app.put("/api/media/{subdir}/{filename}")
+async def upload_media_file(
+    subdir: str, filename: str, file: UploadFile = File(...)  # noqa: B008
+) -> dict[str, Any]:
+    """Upload (restore) a file to a media subdirectory."""
+    if subdir not in MEDIA_SUBDIRS:
+        raise HTTPException(status_code=400, detail=f"Invalid subdir: {subdir}")
+
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    cfg = get_config()
+    dir_path = Path(cfg.media_path) / subdir
+    dir_path.mkdir(parents=True, exist_ok=True)
+
+    file_path = dir_path / filename
+    data = await file.read()
+    file_path.write_bytes(data)
+
+    return {"uploaded": True, "subdir": subdir, "filename": filename, "size": len(data)}
