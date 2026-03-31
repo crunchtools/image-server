@@ -250,6 +250,13 @@ async def delete_asset(asset_id: int) -> dict[str, Any]:
     return {"deleted": True, "id": asset_id}
 
 
+@app.get("/api/assets/all")
+async def list_all_assets() -> list[dict[str, Any]]:
+    """List all assets across all POIs."""
+    assets = db.get_all_assets()
+    return [_serialize_asset(a) for a in assets]
+
+
 @app.get("/api/assets")
 async def list_assets(
     poi_id: int | None = Query(None),

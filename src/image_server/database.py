@@ -253,6 +253,16 @@ def update_asset(
         return dict(row) if row else None
 
 
+def get_all_assets() -> list[dict[str, Any]]:
+    """Get all assets across all POIs."""
+    pool = get_pool()
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM assets ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def delete_asset(asset_id: int) -> bool:
     """Delete an asset. Returns True if deleted."""
     pool = get_pool()
