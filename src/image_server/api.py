@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
-import subprocess
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any
@@ -442,32 +443,47 @@ async def bulk_caption(body: dict[str, Any]) -> dict[str, Any]:
 MEDIA_SUBDIRS = {"originals", "thumbnails", "videos", "theme-videos"}
 
 
-@app.get("/api/backup/db")
-async def backup_db() -> StreamingResponse:
-    """Stream a pg_dump of the image server database."""
+def _pg_env() -> dict[str, str]:
+    """Build environment dict for pg_dump / psql subprocesses."""
     cfg = get_config()
-    env = {
+    return {
         "PGHOST": cfg.pg_host,
         "PGPORT": str(cfg.pg_port),
         "PGDATABASE": cfg.pg_database,
         "PGUSER": cfg.pg_user,
         "PGPASSWORD": cfg.pg_password,
     }
+
+
+@app.get("/api/backup/db")
+async def backup_db() -> StreamingResponse:
+    """Stream a pg_dump of the image server database."""
+    env = _pg_env()
     try:
-        result = subprocess.run(
-            ["pg_dump", "--clean", "--if-exists"],  # noqa: S607
+        proc = await asyncio.create_subprocess_exec(
+            "pg_dump", "--clean", "--if-exists",
             env=env,
-            capture_output=True,
-            check=True,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail="pg_dump not found on server") from exc
-    except subprocess.CalledProcessError as exc:
-        logger.exception("pg_dump failed: %s", exc.stderr.decode(errors="replace"))
-        raise HTTPException(status_code=500, detail="pg_dump failed") from exc
+
+    async def _stream() -> asyncio.AsyncIterator[bytes]:  # type: ignore[type-arg]
+        assert proc.stdout is not None
+        while True:
+            chunk = await proc.stdout.read(64 * 1024)
+            if not chunk:
+                break
+            yield chunk
+        retcode = await proc.wait()
+        if retcode != 0:
+            assert proc.stderr is not None
+            err = (await proc.stderr.read()).decode(errors="replace")
+            logger.error("pg_dump exited %d: %s", retcode, err)
 
     return StreamingResponse(
-        iter([result.stdout]),
+        _stream(),
         media_type="application/sql",
         headers={"Content-Disposition": "attachment; filename=imageserver-backup.sql"},
     )
@@ -476,33 +492,33 @@ async def backup_db() -> StreamingResponse:
 @app.post("/api/restore/db")
 async def restore_db(file: UploadFile = File(...)) -> dict[str, Any]:  # noqa: B008
     """Restore the image server database from a SQL dump upload."""
-    cfg = get_config()
-    env = {
-        "PGHOST": cfg.pg_host,
-        "PGPORT": str(cfg.pg_port),
-        "PGDATABASE": cfg.pg_database,
-        "PGUSER": cfg.pg_user,
-        "PGPASSWORD": cfg.pg_password,
-    }
-    sql_data = await file.read()
+    env = _pg_env()
     try:
-        result = subprocess.run(
-            ["psql"],  # noqa: S607
+        proc = await asyncio.create_subprocess_exec(
+            "psql",
             env=env,
-            input=sql_data,
-            capture_output=True,
-            check=True,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail="psql not found on server") from exc
-    except subprocess.CalledProcessError as exc:
-        logger.exception("psql restore failed: %s", exc.stderr.decode(errors="replace"))
-        raise HTTPException(
-            status_code=500,
-            detail=f"psql restore failed: {exc.stderr.decode(errors='replace')[:500]}",
-        ) from exc
 
-    return {"restored": True, "output": result.stdout.decode(errors="replace")[:1000]}
+    # Stream upload data into psql stdin in chunks
+    assert proc.stdin is not None
+    while chunk := await file.read(64 * 1024):
+        proc.stdin.write(chunk)
+        await proc.stdin.drain()
+    proc.stdin.close()
+    await proc.stdin.wait_closed()
+
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        err_msg = stderr.decode(errors="replace")[:500]
+        logger.error("psql restore failed (exit %d): %s", proc.returncode, err_msg)
+        raise HTTPException(status_code=500, detail=f"psql restore failed: {err_msg}")
+
+    return {"restored": True, "output": stdout.decode(errors="replace")[:1000]}
 
 
 @app.get("/api/media/files")
@@ -564,7 +580,8 @@ async def upload_media_file(
     dir_path.mkdir(parents=True, exist_ok=True)
 
     file_path = dir_path / filename
-    data = await file.read()
-    file_path.write_bytes(data)
+    with file_path.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-    return {"uploaded": True, "subdir": subdir, "filename": filename, "size": len(data)}
+    size = file_path.stat().st_size
+    return {"uploaded": True, "subdir": subdir, "filename": filename, "size": size}
