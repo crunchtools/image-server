@@ -17,7 +17,7 @@ from . import database as db
 from .config import get_config
 from .embedder import embed_query, embed_texts
 from .exif import extract_exif
-from .thumbnails import generate_thumbnail_from_bytes, get_image_dimensions
+from .thumbnails import generate_all_thumbnails_from_bytes, generate_thumbnail_from_bytes, get_image_dimensions
 from .vision import get_backend
 
 logger = logging.getLogger(__name__)
@@ -121,10 +121,13 @@ async def upload_asset(
             logger.warning("Could not get image dimensions for %s", filename)
 
         try:
+            # Legacy single thumbnail (backward compatibility)
             thumb_path = Path(cfg.media_path) / "thumbnails" / f"{file_uuid}.jpg"
             generate_thumbnail_from_bytes(data, thumb_path)
+            # Multi-size thumbnails (small, medium, large)
+            generate_all_thumbnails_from_bytes(data, file_uuid)
         except Exception:
-            logger.warning("Could not generate thumbnail for %s", filename)
+            logger.warning("Could not generate thumbnails for %s", filename)
 
     # Extract EXIF for images
     exif_data: dict[str, Any] = {}
@@ -202,8 +205,14 @@ async def serve_original(asset_id: int) -> FileResponse:
 
 
 @app.get("/api/assets/{asset_id}/thumbnail")
-async def serve_thumbnail(asset_id: int) -> FileResponse:
-    """Serve the pre-generated thumbnail for an asset."""
+async def serve_thumbnail(
+    asset_id: int, size: str | None = Query(None)
+) -> FileResponse:
+    """Serve a thumbnail for an asset.
+
+    Optional size parameter: small (100px), medium (600px), large (1200px).
+    Without size parameter, returns the legacy 250px thumbnail.
+    """
     asset = db.get_asset(asset_id)
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
@@ -213,10 +222,20 @@ async def serve_thumbnail(asset_id: int) -> FileResponse:
 
     cfg = get_config()
     file_uuid = asset["filename"].rsplit(".", 1)[0]
-    thumb_path = Path(cfg.media_path) / "thumbnails" / f"{file_uuid}.jpg"
+
+    if size and size in ("small", "medium", "large"):
+        thumb_path = Path(cfg.media_path) / "thumbnails" / size / f"{file_uuid}.jpg"
+    else:
+        # Legacy path (backward compatible)
+        thumb_path = Path(cfg.media_path) / "thumbnails" / f"{file_uuid}.jpg"
 
     if not thumb_path.exists():
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
+        # Fall back to legacy thumbnail if sized version doesn't exist yet
+        fallback = Path(cfg.media_path) / "thumbnails" / f"{file_uuid}.jpg"
+        if fallback.exists():
+            thumb_path = fallback
+        else:
+            raise HTTPException(status_code=404, detail="Thumbnail not found")
 
     return FileResponse(path=str(thumb_path), media_type="image/jpeg")
 
@@ -240,12 +259,16 @@ async def delete_asset(asset_id: int) -> dict[str, Any]:
     if original_path.exists():
         original_path.unlink()
 
-    # Delete thumbnail
+    # Delete thumbnails (legacy + all sizes)
     if asset["asset_type"] == "image":
         file_uuid = asset["filename"].rsplit(".", 1)[0]
         thumb_path = Path(cfg.media_path) / "thumbnails" / f"{file_uuid}.jpg"
         if thumb_path.exists():
             thumb_path.unlink()
+        for size_name in ("small", "medium", "large"):
+            sized_path = Path(cfg.media_path) / "thumbnails" / size_name / f"{file_uuid}.jpg"
+            if sized_path.exists():
+                sized_path.unlink()
 
     # Delete from database
     db.delete_asset(asset_id)
