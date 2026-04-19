@@ -11,6 +11,13 @@ DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 DEFAULT_THUMBNAIL_SIZE = 250
 DEFAULT_VISION_TIMEOUT = 120
 
+# Multi-size thumbnail configuration: name → max dimension (width or height)
+THUMBNAIL_SIZES = {
+    "small": 100,
+    "medium": 600,
+    "large": 1200,
+}
+
 DEFAULT_VISION_PROMPT = (
     "Describe this image concisely for search indexing. Include: what you see, "
     "any identifiable location, season or time of day, and any readable text or signs. "
@@ -76,6 +83,9 @@ class Config:
         base = Path(self.media_path)
         for subdir in ("originals", "thumbnails", "videos", "theme-videos"):
             (base / subdir).mkdir(parents=True, exist_ok=True)
+        # Multi-size thumbnail directories
+        for size_name in THUMBNAIL_SIZES:
+            (base / "thumbnails" / size_name).mkdir(parents=True, exist_ok=True)
 
 
 def get_config() -> Config:
