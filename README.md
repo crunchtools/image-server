@@ -1,48 +1,31 @@
-# Image Server — superseded
+# Image Server — retired
 
-> **This repository is no longer the source of truth.** The image server lives in
-> [`crunchtools/rotv`](https://github.com/crunchtools/rotv) under `image-server/`,
-> which is where it is developed and released from.
->
-> This copy last changed on 2026-04-19 and had drifted 309 lines across seven
-> files from the live one. Until 2026-09-06 it also built and pushed
-> `quay.io/crunchtools/images-rotv:latest` — the same tag `crunchtools/rotv`
-> publishes, from the same weekly `parent-image-updated` dispatch. Whichever
-> build finished last won the tag, so production could have been served this
-> stale code at any point. That workflow has been removed.
->
-> Do not commit here. Open changes against `crunchtools/rotv`.
+**The image server lives in [`crunchtools/rotv`](https://github.com/crunchtools/rotv) under `image-server/`.**
+Open changes there. Nothing in this repository is built or deployed.
 
+## What happened
 
-Lightweight image server with AI captioning and semantic search. Purpose-built replacement for Immich in the ROTV stack.
+The code moved into the ROTV monorepo per spec `008-image-server-monorepo` ("Move the
+image-server Python codebase (crunchtools/image-server) into the ROTV repo as a sibling
+service"). This repo was never retired afterwards, and it kept building.
 
-## Features
+Both repos pushed `quay.io/crunchtools/images-rotv:latest`, both fired by the same weekly
+`parent-image-updated` dispatch, so whichever build finished last won the tag. By then the
+two copies had drifted **309 lines across seven files** — `api.py`, `config.py`,
+`database.py`, `exif.py`, `main.py`, `thumbnails.py`, `vision.py`. A build from here would
+have put months-old code behind `images.rootsofthevalley.org`. It last pushed successfully
+on 2026-08-30.
 
-- Image upload with automatic thumbnail generation
-- EXIF metadata extraction
-- AI captioning via Gemini vision
-- Semantic search via fastembed + pgvector
-- Full-text search via PostgreSQL tsvector
-- Theme video serving
-- REST API (FastAPI)
+The build workflow was removed in #5. The source was removed here so it cannot be mistaken
+for something maintained.
 
-## Quick Start
+## The old code
 
-```bash
-podman build -t quay.io/crunchtools/image-server .
+Preserved in full, two ways:
 
-podman run -d --name image-server \
-  -p 8000:8000 \
-  -v image-server-pgdata:/var/lib/pgsql/data:Z \
-  -v image-server-media:/data/media:Z \
-  --systemd=always \
-  quay.io/crunchtools/image-server
-```
+- **[Release `archive-2026-09-06`](https://github.com/crunchtools/image-server/releases/tag/archive-2026-09-06)**
+  — `.tar.gz` and `.zip` of the complete tree, with `SHA256SUMS`.
+- **This repository's git history**, unchanged. `git log` and `git show` still work;
+  the last commit to touch `src/` was `9ad04df` on 2026-04-19.
 
-## API
-
-See `src/image_server/api.py` for full endpoint documentation.
-
-## License
-
-AGPL-3.0-or-later
+To get it back: `gh release download archive-2026-09-06 --repo crunchtools/image-server`
